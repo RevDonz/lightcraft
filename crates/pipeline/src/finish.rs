@@ -84,9 +84,14 @@ fn vignette(s: &DevelopSettings) -> Option<Vig> {
     })
 }
 
-/// The finest grain cell from process V3, as a fraction of the long edge: one pixel on a
-/// 24 MP (6000 × 4000) export, where a finer cell would only alias.
-const GRAIN_CELL_FINEST: f32 = 1.0 / 6000.0;
+/// The finest grain cell from process V3, as a fraction of the long edge: a 1.5 px grain on a 24 MP
+/// (6000 × 4000) export, the finest [`GRAIN_CELL_MIN_PX`] draws in full.
+const GRAIN_CELL_FINEST: f32 = 1.0 / 4000.0;
+
+/// The smallest grain cell drawn from process V3, in pixels. The grain is sampled once per pixel,
+/// so a cell near one pixel beats against the pixel grid (bands of stronger and fainter grain
+/// about 100 px apart at 6048 px); from 1.5 px the beat is at most 3 px across and reads as grain.
+const GRAIN_CELL_MIN_PX: f32 = 1.5;
 
 /// Grain cell size as a fraction of the long edge for `s`'s Grain Size (0–100). Up to V2 it ran
 /// from 0.06 % (Size 0) to 0.3 % (Size 100), so even Size 0 was a 3–4 px grain on a full-size
@@ -99,6 +104,19 @@ fn grain_cell(s: &DevelopSettings) -> f32 {
         Process::V1 | Process::V2 => linear,
         Process::V3 if size >= 0.25 => linear,
         Process::V3 => GRAIN_CELL_FINEST + size.max(0.0) / 0.25 * (0.0012 - GRAIN_CELL_FINEST),
+    }
+}
+
+/// The grain's cell (px) and strength factor for a render `px_per_long` pixels across the long
+/// edge. Up to V2 a cell under 0.6 px is drawn at 0.6 px in full. From V3 a cell under
+/// [`GRAIN_CELL_MIN_PX`] is drawn at that size and fainter (by the square root of the ratio), as
+/// such a grain averages out when a full-size render is scaled down: a small preview then has
+/// about the grain of the export scaled down to it.
+fn grain_draw(s: &DevelopSettings, px_per_long: f64) -> (f32, f32) {
+    let cell = grain_cell(s) * px_per_long as f32;
+    match s.process.process() {
+        Process::V1 | Process::V2 => (cell.max(0.6), 1.0),
+        Process::V3 => (cell.max(GRAIN_CELL_MIN_PX), (cell / GRAIN_CELL_MIN_PX).min(1.0).sqrt()),
     }
 }
 
@@ -237,8 +255,8 @@ impl FinishParams {
         let ev = s.light.exposure as f32;
         let gain = 2f32.powf(ev);
         let grain = (s.grain.amount > 0.0 && effects).then(|| {
-            let cell = grain_cell(s) * px_per_long as f32;
-            ((s.grain.amount / 100.0) as f32 * 0.13, cell.max(0.6), (s.grain.roughness / 100.0) as f32, s.grain.seed)
+            let (cell, strength) = grain_draw(s, px_per_long);
+            ((s.grain.amount / 100.0) as f32 * 0.13 * strength, cell, (s.grain.roughness / 100.0) as f32, s.grain.seed)
         });
         let calibration = s.section_enabled("calibration");
         let peak = s.hdr.peak();
@@ -808,15 +826,16 @@ mod tests {
     }
 
     #[test]
-    fn grain_size_reaches_one_pixel_and_keeps_the_default() {
-        let cell = |process: Process, size: f64| {
+    fn grain_size_reaches_a_fine_grain_and_keeps_the_default() {
+        let settings = |process: Process, size: f64| {
             let mut s = DevelopSettings { process: process.version(), ..DevelopSettings::default() };
             s.grain.size = size;
-            grain_cell(&s)
+            s
         };
-        // on a 24 MP export (6000 px long edge) Size 0 was a 3.6 px cell; from V3 it is one pixel
+        let cell = |process: Process, size: f64| grain_cell(&settings(process, size));
+        // on a 24 MP export (6000 px long edge) Size 0 was a 3.6 px cell; from V3 it is 1.5 px
         assert!((cell(Process::V2, 0.0) * 6000.0 - 3.6).abs() < 1e-3);
-        assert!((cell(Process::V3, 0.0) * 6000.0 - 1.0).abs() < 1e-3);
+        assert!((cell(Process::V3, 0.0) * 6000.0 - 1.5).abs() < 1e-3);
         // the default (25) and above, where presets and Lightroom imports mostly sit, are unchanged
         for size in [25.0, 30.0, 40.0, 75.0, 100.0] {
             assert_eq!(cell(Process::V3, size), cell(Process::V2, size), "{size}");
@@ -830,6 +849,16 @@ mod tests {
         // out-of-range and NaN sizes stay a finite cell
         assert_eq!(cell(Process::V3, -20.0), GRAIN_CELL_FINEST);
         assert_eq!(cell(Process::V3, f64::NAN), GRAIN_CELL_FINEST);
+
+        // drawn: V2 raises a small cell to 0.6 px in full; V3 to 1.5 px, fainter
+        let draw = |process: Process, size: f64, long: f64| grain_draw(&settings(process, size), long);
+        assert_eq!(draw(Process::V2, 0.0, 6000.0), (cell(Process::V2, 0.0) * 6000.0, 1.0));
+        assert_eq!(draw(Process::V2, 0.0, 500.0), (0.6, 1.0));
+        assert_eq!(draw(Process::V3, 0.0, 6000.0).1, 1.0);
+        let (c, k) = draw(Process::V3, 0.0, 1500.0);
+        assert_eq!(c, GRAIN_CELL_MIN_PX);
+        assert!((k - 0.5).abs() < 1e-6, "{k}");
+        assert_eq!(draw(Process::V3, 0.0, 0.0), (GRAIN_CELL_MIN_PX, 0.0));
     }
 
     #[test]

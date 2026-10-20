@@ -118,39 +118,89 @@ fn mask_brightens_only_inside() {
     assert!(r.get(50, 50)[0] > r.get(5, 5)[0] + 40);
 }
 
-/// Grain Size 0 is a one-pixel grain on a full-size (24 MP) export from process V3 (issue #2372):
-/// neighbouring pixels of a flat grey vary on their own, where V2's Size 0 drew 3–4 px blobs. The
-/// default size renders as before.
-#[test]
-fn grain_size_zero_is_pixel_fine_on_a_full_size_export() {
-    use lightcraft_develop::Process;
+/// Grain at `size` on flat grey: the luma of a `w × h` window at (`x`, `y`) of a render `long`
+/// pixels across, without sharpening.
+fn grain_luma(process: lightcraft_develop::Process, size: f64, long: usize, win: crate::PixelWindow) -> (Vec<f32>, usize) {
     let src = Rgb32f::filled(60, 40, [0.18, 0.18, 0.18]);
-    let win = crate::PixelWindow { x: 2000, y: 1500, w: 128, h: 128 };
-    let req = RenderRequest { window: Some(win), ..RenderRequest::fit(6000, 4000) };
-    let grain = |process: Process, size: f64| {
-        let mut s = DevelopSettings { process: process.version(), ..DevelopSettings::default() };
-        s.detail.sharpen_amount = 0.0;
-        s.grain.amount = 100.0;
-        s.grain.size = size;
-        s.grain.roughness = 0.0;
-        render(&src, &SourceInfo::default(), &s, &req).image
-    };
-    // correlation of horizontal neighbours' luma: near 1 for blobs, low for a pixel-fine grain
-    let neighbours = |img: &lightcraft_raster::Rgba8| {
-        let luma: Vec<f32> = img.data.iter().map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).collect();
+    let req = RenderRequest { window: Some(win), ..RenderRequest::fit(long, long * 2 / 3) };
+    let mut s = DevelopSettings { process: process.version(), ..DevelopSettings::default() };
+    s.detail.sharpen_amount = 0.0;
+    s.grain.amount = 100.0;
+    s.grain.size = size;
+    s.grain.roughness = 0.0;
+    let img = render(&src, &SourceInfo::default(), &s, &req).image;
+    (img.data.iter().map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).collect(), img.width)
+}
+
+fn std_dev(v: &[f32]) -> f32 {
+    let mean = v.iter().sum::<f32>() / v.len() as f32;
+    (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / v.len() as f32).sqrt()
+}
+
+/// Grain Size 0 is a fine grain on a full-size (24 MP) export from process V3 (issue #2372), where
+/// V2's drew 3–4 px blobs, and it is as strong everywhere at any export width: a grain near one
+/// pixel would beat against the pixel grid in bands. The default size renders as before.
+#[test]
+fn grain_size_zero_is_fine_and_even_on_a_full_size_export() {
+    use lightcraft_develop::Process;
+    let win = crate::PixelWindow { x: 2000, y: 1500, w: 256, h: 256 };
+    // correlation of horizontal neighbours: near 1 for blobs, low for a fine grain
+    let neighbours = |luma: &[f32]| {
         let mean = luma.iter().sum::<f32>() / luma.len() as f32;
         let (mut cov, mut var) = (0.0, 0.0);
         for (i, &v) in luma.iter().enumerate() {
             var += (v - mean) * (v - mean);
-            if (i + 1) % img.width != 0 {
+            if (i + 1) % 256 != 0 {
                 cov += (v - mean) * (luma[i + 1] - mean);
             }
         }
         cov / var
     };
-    let (v2, v3) = (neighbours(&grain(Process::V2, 0.0)), neighbours(&grain(Process::V3, 0.0)));
-    assert!(v2 > 0.8 && v3 < 0.6, "V2 {v2:.2}, V3 {v3:.2}");
-    assert!(grain(Process::V2, 25.0) == grain(Process::V3, 25.0), "the default size renders as before");
+    let default = std_dev(&grain_luma(Process::V3, 25.0, 6000, win).0);
+    // 6048 px: the Sony A7 III and Nikon Z6
+    for long in [6000, 6001, 6048] {
+        let v2 = grain_luma(Process::V2, 0.0, long, win).0;
+        let v3 = grain_luma(Process::V3, 0.0, long, win).0;
+        let (c2, c3) = (neighbours(&v2), neighbours(&v3));
+        assert!(c2 > 0.8 && c3 < 0.6, "{long}: V2 {c2:.2}, V3 {c3:.2}");
+        // the grain's strength in 32 px bands across and down the window, and against Size 25's
+        let bands: Vec<f32> = (0..8)
+            .flat_map(|b| {
+                let across: Vec<f32> = v3.iter().enumerate().filter(|(i, _)| i % 256 / 32 == b).map(|(_, &v)| v).collect();
+                [std_dev(&across), std_dev(&v3[b * 32 * 256..(b + 1) * 32 * 256])]
+            })
+            .collect();
+        let (lo, hi) = bands.iter().fold((f32::MAX, 0f32), |(lo, hi), &b| (lo.min(b), hi.max(b)));
+        assert!(hi / lo < 1.15, "{long}: bands from {lo:.1} to {hi:.1}");
+        let strength = std_dev(&v3) / default;
+        assert!((0.9..1.1).contains(&strength), "{long}: {strength:.2} of Size 25's");
+    }
+    let (a, b) = (grain_luma(Process::V2, 25.0, 6000, win).0, grain_luma(Process::V3, 25.0, 6000, win).0);
+    assert_eq!(a.iter().zip(&b).filter(|(a, b)| a != b).count(), 0, "the default size renders as before");
+}
+
+/// From process V3 a grain finer than a small render can draw is drawn fainter there, so a
+/// fit-to-window preview has about the grain of the full-size export scaled down to it.
+#[test]
+fn small_grain_in_a_preview_matches_the_export_scaled_down() {
+    use lightcraft_develop::Process;
+    for (long, k) in [(1000, 6), (1500, 4), (2000, 3)] {
+        let preview = crate::PixelWindow { x: 2000 / k, y: 1500 / k, w: 192, h: 192 };
+        let full = crate::PixelWindow { x: 2000, y: 1500, w: 192 * k, h: 192 * k };
+        for size in [0.0, 5.0, 10.0, 25.0] {
+            let small = std_dev(&grain_luma(Process::V3, size, long, preview).0);
+            let (big, w) = grain_luma(Process::V3, size, 6000, full);
+            // the export scaled down k× (box filter)
+            let down: Vec<f32> = (0..192 * 192)
+                .map(|i| {
+                    let (x, y) = (i % 192 * k, i / 192 * k);
+                    (0..k * k).map(|j| big[(y + j / k) * w + x + j % k]).sum::<f32>() / (k * k) as f32
+                })
+                .collect();
+            let ratio = small / std_dev(&down);
+            assert!((0.8..1.4).contains(&ratio), "{long} px, Size {size}: {ratio:.2} of the export's grain");
+        }
+    }
 }
 
 #[test]

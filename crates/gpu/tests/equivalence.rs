@@ -823,6 +823,13 @@ fn windows_match() {
     s.vignette.midpoint = 10.0;
     let corner = RenderRequest { window: Some(PixelWindow { x: 2360, y: 1520, w: 640, h: 480 }), ..RenderRequest::fit(3000, 2000) };
     check("window: vignette corner", &src, &info, &s, &corner);
+    // a window of a 24 MP render, where Grain Size 0 is drawn at its finest cell in full (#2372)
+    let mut s = DevelopSettings::default();
+    s.grain.amount = 50.0;
+    s.grain.size = 0.0;
+    s.grain.roughness = 60.0;
+    let full = RenderRequest { window: Some(PixelWindow { x: 2000, y: 1500, w: 640, h: 480 }), ..RenderRequest::fit(6000, 4000) };
+    check("window: grain (finest) at 24 MP", &src, &info, &s, &full);
 }
 
 /// Issue #323: a window of a 24 MP photo is cut from a source of 288 MB on the device. Keeping that
