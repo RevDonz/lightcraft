@@ -118,6 +118,41 @@ fn mask_brightens_only_inside() {
     assert!(r.get(50, 50)[0] > r.get(5, 5)[0] + 40);
 }
 
+/// Grain Size 0 is a one-pixel grain on a full-size (24 MP) export from process V3 (issue #2372):
+/// neighbouring pixels of a flat grey vary on their own, where V2's Size 0 drew 3–4 px blobs. The
+/// default size renders as before.
+#[test]
+fn grain_size_zero_is_pixel_fine_on_a_full_size_export() {
+    use lightcraft_develop::Process;
+    let src = Rgb32f::filled(60, 40, [0.18, 0.18, 0.18]);
+    let win = crate::PixelWindow { x: 2000, y: 1500, w: 128, h: 128 };
+    let req = RenderRequest { window: Some(win), ..RenderRequest::fit(6000, 4000) };
+    let grain = |process: Process, size: f64| {
+        let mut s = DevelopSettings { process: process.version(), ..DevelopSettings::default() };
+        s.detail.sharpen_amount = 0.0;
+        s.grain.amount = 100.0;
+        s.grain.size = size;
+        s.grain.roughness = 0.0;
+        render(&src, &SourceInfo::default(), &s, &req).image
+    };
+    // correlation of horizontal neighbours' luma: near 1 for blobs, low for a pixel-fine grain
+    let neighbours = |img: &lightcraft_raster::Rgba8| {
+        let luma: Vec<f32> = img.data.iter().map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).collect();
+        let mean = luma.iter().sum::<f32>() / luma.len() as f32;
+        let (mut cov, mut var) = (0.0, 0.0);
+        for (i, &v) in luma.iter().enumerate() {
+            var += (v - mean) * (v - mean);
+            if (i + 1) % img.width != 0 {
+                cov += (v - mean) * (luma[i + 1] - mean);
+            }
+        }
+        cov / var
+    };
+    let (v2, v3) = (neighbours(&grain(Process::V2, 0.0)), neighbours(&grain(Process::V3, 0.0)));
+    assert!(v2 > 0.8 && v3 < 0.6, "V2 {v2:.2}, V3 {v3:.2}");
+    assert!(grain(Process::V2, 25.0) == grain(Process::V3, 25.0), "the default size renders as before");
+}
+
 #[test]
 #[ignore]
 fn perf_report() {

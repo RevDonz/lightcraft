@@ -84,6 +84,24 @@ fn vignette(s: &DevelopSettings) -> Option<Vig> {
     })
 }
 
+/// The finest grain cell from process V3, as a fraction of the long edge: one pixel on a
+/// 24 MP (6000 × 4000) export, where a finer cell would only alias.
+const GRAIN_CELL_FINEST: f32 = 1.0 / 6000.0;
+
+/// Grain cell size as a fraction of the long edge for `s`'s Grain Size (0–100). Up to V2 it ran
+/// from 0.06 % (Size 0) to 0.3 % (Size 100), so even Size 0 was a 3–4 px grain on a full-size
+/// export (issue #2372). From V3, Size 25 (the default) and above keep that scale, so presets and
+/// most edits render as before, and below 25 it falls on to [`GRAIN_CELL_FINEST`].
+fn grain_cell(s: &DevelopSettings) -> f32 {
+    let size = (s.grain.size / 100.0) as f32;
+    let linear = 0.0006 + size * 0.0024;
+    match s.process.process() {
+        Process::V1 | Process::V2 => linear,
+        Process::V3 if size >= 0.25 => linear,
+        Process::V3 => GRAIN_CELL_FINEST + size.max(0.0) / 0.25 * (0.0012 - GRAIN_CELL_FINEST),
+    }
+}
+
 /// Hash constants of [`grain_noise`] (shared with the GPU kernel).
 pub const GRAIN_HASH: [u32; 4] = [0x8da6_b343, 0xd816_3841, 0xcb1a_b31f, 0x5bd1_e995];
 
@@ -219,7 +237,7 @@ impl FinishParams {
         let ev = s.light.exposure as f32;
         let gain = 2f32.powf(ev);
         let grain = (s.grain.amount > 0.0 && effects).then(|| {
-            let cell = (0.0006 + (s.grain.size / 100.0) as f32 * 0.0024) * px_per_long as f32;
+            let cell = grain_cell(s) * px_per_long as f32;
             ((s.grain.amount / 100.0) as f32 * 0.13, cell.max(0.6), (s.grain.roughness / 100.0) as f32, s.grain.seed)
         });
         let calibration = s.section_enabled("calibration");
@@ -280,8 +298,9 @@ impl FinishParams {
 pub fn base_tone(s: &DevelopSettings, info: &SourceInfo, peak: f32) -> ToneMap {
     let l = &s.light;
     match s.process.process() {
-        // V2 changes the Highlights/Shadows base (`local::tone_base`), not the tone map
-        Process::V1 | Process::V2 => match info.camera_tone.as_ref().filter(|_| info.raw) {
+        // V2 changes the Highlights/Shadows base (`local::tone_base`) and V3 the grain size
+        // (`grain_cell`), not the tone map
+        Process::V1 | Process::V2 | Process::V3 => match info.camera_tone.as_ref().filter(|_| info.raw) {
             Some(curve) => ToneMap::camera_hdr(curve, l.contrast, l.whites, l.blacks, peak),
             None if info.raw => ToneMap::hdr(l.contrast, l.whites, l.blacks, peak),
             None => ToneMap::display_hdr(l.contrast, l.whites, l.blacks, peak),
@@ -786,6 +805,31 @@ mod tests {
         // luma is kept
         let y = |e: [f32; 3]| 0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2];
         assert!((y(r) - y(after)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn grain_size_reaches_one_pixel_and_keeps_the_default() {
+        let cell = |process: Process, size: f64| {
+            let mut s = DevelopSettings { process: process.version(), ..DevelopSettings::default() };
+            s.grain.size = size;
+            grain_cell(&s)
+        };
+        // on a 24 MP export (6000 px long edge) Size 0 was a 3.6 px cell; from V3 it is one pixel
+        assert!((cell(Process::V2, 0.0) * 6000.0 - 3.6).abs() < 1e-3);
+        assert!((cell(Process::V3, 0.0) * 6000.0 - 1.0).abs() < 1e-3);
+        // the default (25) and above, where presets and Lightroom imports mostly sit, are unchanged
+        for size in [25.0, 30.0, 40.0, 75.0, 100.0] {
+            assert_eq!(cell(Process::V3, size), cell(Process::V2, size), "{size}");
+        }
+        assert_eq!(cell(Process::V1, 10.0), cell(Process::V2, 10.0));
+        // finer below 25, growing with Size without a jump at 25
+        let cells: Vec<f32> = (0..=100).map(|i| cell(Process::V3, i as f64)).collect();
+        assert!(cells.windows(2).all(|w| w[0] < w[1]));
+        assert!((cell(Process::V3, 24.999) - cell(Process::V3, 25.0)).abs() < 1e-7);
+        assert!(cell(Process::V3, 10.0) < cell(Process::V2, 10.0));
+        // out-of-range and NaN sizes stay a finite cell
+        assert_eq!(cell(Process::V3, -20.0), GRAIN_CELL_FINEST);
+        assert_eq!(cell(Process::V3, f64::NAN), GRAIN_CELL_FINEST);
     }
 
     #[test]

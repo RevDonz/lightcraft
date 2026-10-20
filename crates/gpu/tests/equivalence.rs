@@ -216,6 +216,11 @@ fn cases() -> Vec<(&'static str, Edit)> {
             s.grain.size = 40.0;
             s.grain.roughness = 60.0;
         }),
+        ("grain (finest)", |s| {
+            s.grain.amount = 50.0;
+            s.grain.size = 0.0;
+            s.grain.roughness = 60.0;
+        }),
         ("dehaze -", |s| s.effects.dehaze = -50.0),
         ("dehaze +", |s| s.effects.dehaze = 60.0),
         ("clarity/texture -", |s| {

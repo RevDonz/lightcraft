@@ -1,5 +1,13 @@
 # What's new in LightCraft
 
+## 2026-10-20
+
+### Finer grain (process 3)
+- Grain Size now goes down to a grain one pixel across on a full-size 24 MP export (issue #2372). Size 0 used to
+  draw grain 3–4 pixels wide, coarser than film grain looks. Sizes from 25 (the default) up are unchanged, so presets
+  look as before. This is rendering process 3: new photos (and Reset) get it, photos you already edited keep their
+  look until you choose Photo ▸ Update to Current Process. See [process versions](process-versions.md).
+
 ## 2026-10-14
 
 ### Model downloads time out on a name that doesn't resolve
